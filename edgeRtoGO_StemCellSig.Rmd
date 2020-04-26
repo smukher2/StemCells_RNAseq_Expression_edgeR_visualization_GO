@@ -1,0 +1,601 @@
+---
+title: "edgeRtoGO"
+author: "Shradha Mukherjee"
+output:
+  pdf_document: default
+  html_document: default
+update: October 1, 2017
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+getwd()
+```
+```{r}
+list.files()
+```
+#Libraries and preliminaries
+These packages can be downloaded from Bioconductor using the following commands in R or Rstudio
+## try http:// if https:// URLs are not supported
+source("https://bioconductor.org/biocLite.R")
+biocLite("name_of_package")
+
+```{r}
+library(biomaRt)#required for the gene symbol conversion
+library(dplyr) # used for general data wrangling
+library(tidyr) # used for tidying tables
+library(ggplot2) # I don't think I need to explain this one
+library(edgeR) # for RNAseq DE testing  
+library(stringr) # for strng substitutions
+library(DT) # for displaying tables interactively in R Markdown
+library(ggmap)#plots
+library(gplots)#plots
+library(RColorBrewer)#color pallet
+library(Hmisc)#for corelation plot
+library(viridis)#for corelation plot
+library(corrplot)#for corelation plot
+library("GeneOverlap")#for list comparison
+library("enrichR")#for pathway analysis
+set.seed(1903) # setting the random number generator for reproducibility
+options(stringsAsFactors = F) # for reproducibility
+```
+#Loading count data 
+```{r}
+table=read.delim('merged_scVSnonsc_counts.txt', header=T, sep='\t')
+glimpse(table)
+```
+
+```{r}
+#Incase there are 'na' in the data they can be ommited in the analysis from the table by uncommenting command below, as EdgeR will not work with 'na':
+#table=na.omit(table)
+```
+
+```{r}
+#Incase glimpse(table) shows 'dbl' values instead of 'int', this can be changed to 'int' by uncommenting code below, as EdgeR will not work with 'dbl':
+#table = table %>%
+#  mutate_if(is.double, as.integer) 
+#glimpse(table[1:10])
+```
+
+Filter out low counts from table such that sum of row data is greater than the total number of samples.Here we have 22 samples.We do not include the gene name columns and create a variable 'KeepValues' that records or is a placeholder for all rows that are True for the condition of rowSums>22
+
+```{r}
+KeepValues<-rowSums(table[,-1])>22
+table_filt<-table[KeepValues,]#only retain the KeepValues True rows
+#Let's see how many rows we filtered out 
+dim(table)
+dim(table_filt)
+```
+
+```{r}
+glimpse(table_filt)
+```
+
+#Loading meta-data
+```{r}
+metatable = read.delim('scVSnonsc_metadata.txt',header = T, sep = '\t')
+glimpse(metatable)
+```
+
+The indivudual_id is added to the metadata pretending same mice contributed once to the variable, though each came from 4-6 mice pooled together. This is included as in practical examples too where same animal or patient may contribute multiple samples constituting different cell types or different tissues part of the same mice. 
+
+'cell type' is abbreviation for 'cell_type_full_name' are effectively the same. The cell_type (represents different cell types) and cell_tissue (represents different tissue source) can be used in experimental design step of edgeR. 
+
+Note in this particular case activated.stemcell_non.stemcell, GSE_id (represents different study) and cell_tissue are effectively same groups, i.e. activated stem cells come from GSE68270 and hippocampus tissue, while non-stem cells come from GSE52564 and cerebral cortex tissue. Therefore, only one of these three variables should be used to avoid multicollinearity problem in design model 'Error: Design matrix not of full rank.'
+
+It also helps to have same number of replicates for groups within a variable. In this example, there are 4 or 3 replicates in each group.Note we find <fctr> which can be text as well as numbers, except individual_id. 
+
+#edgeR formating of input table_filt and DEGList
+Count data
+Convert this count data to DGEList object.
+```{r}
+countdata<-table_filt[,-1]#except Ms_gene 
+rownames(countdata)<-table_filt[,1]# 1 for Ms_gene
+glimpse(countdata)
+rownames(countdata[1:10,])#to view the first 10 rows
+```
+Note: the rownames changed from 1, 2, 3... to Ms_gene symbols
+```{r}
+countdataDGE<-DGEList(countdata)
+dim(countdata)
+dim(countdataDGE)
+```
+
+#edgeR input metatable for edgeR
+Metadata
+Reasign matatable to coldata as a data frame (factors i.e. text+numbers both allowed) 
+```{r}
+coldata<-data.frame(metatable[,-1])
+rownames(coldata)<-metatable$sample_id
+glimpse(coldata)
+rownames(coldata)
+```
+Note the only difference in metatable and coldata is that sample_id 1st column of metatable has been asigned as rowname in coldata. 
+
+#edgeR design matrix
+Make design matrix to describe the statistical model
+Note from edgeR vineatte "> design <- model.matrix(~Batch+Treatment) In this type of analysis, the treatments are compared only within each batch. The analysis correctes for baseline differences between the batches. Similarly can include more variants for corrected analysis". In the design ensure that factors are not redundant or combination of others already in the design, Example: cell_type factor combinations make up activated.stemcell_non.stemcell, so will be redundant for the modeling. Other redundancies in levels are, 1) cell_type is abbreviation of cell_type_full_name, and 2) cell_tissue and GSE_id are redundant i.e. all hippocampus samples belongs to GSE68270 and all cerebral cortex samples belongs to GSE52564. If redundant variables are used in the model generates error 'error in design rank and coefficients cannot be calculated'
+
+For the design here because we are interested in activated.stecell_non.stemcell differential genes we do not add the factor cell_type. 
+
+For interest in cell_type specific differences use the design without the group of activated.stemcell_non.stemcell
+design<-model.matrix(~individual_id+cell_type+cell_tissue, coldata)
+
+
+```{r}
+#Alternative: The 0+ in the model formula is an instruction not to include an intercept column and instead to include a column for each group.
+#design<-model.matrix(~0+individual_id+cell_type+activated.stemcell_non.stemcell+cell_tissue, coldata)
+design<-model.matrix(~individual_id+activated.stemcell_non.stemcell+cell_tissue, coldata)
+colnames(design)
+```
+
+```{r}
+print(design)
+```
+
+#edgeR TMM normalization and estimating dispersion
+With the design matrix given, estimateDisp calculates the adjusted profile log-likelihood for each gene or tag and then maximizes it. Other options are functions estimateGLMCommonDisp, estimateGLMTrendedDisp and estimateGLMTagwiseDisp. 
+Default is TMM in calcNormFactors, Also other methods are available, 
+RLE countdataDGE <- calcNormFactors(countdataDGE, method=c("RLE")) 
+upperquartile countdataDGE <- calcNormFactors(countdataDGE, method=c("upperquartile"))
+```{r}
+countdataDGE<-calcNormFactors(countdataDGE)
+countdataDGE<-estimateDisp(countdataDGE, design)
+#cell_tissue and activated.stemcell_non.stemcell i.e. factors in the design are all being used to estimate dispersion
+print(countdataDGE)
+```
+By using countdataDGE$option we can extract these information example countdataDGE$counts, but note this is not normalized counts, its same as the counts we input. The log transformed counts-per-million (cpm)is normalized counts.
+
+We can plot some information about the heterogeneity of the datasets
+```{r}
+dim(countdataDGE)
+```
+There are 14809 rows or genes and 22 samples or variables
+```{r}
+#BCV plot using DGE object
+plotBCV(countdataDGE)
+dev.print(pdf,"countdataDGE_BCVplot.pdf")
+```
+Inputing RNA-seq counts to clustering or heatmap routines designed for microarray data is not straight-forward, and the best way to do this is still a matter of research. To draw a heatmap of individual RNA-seq samples, edgeR documentation suggests using moderated log-counts-per-million, log(cpm). This can be calculated by cpm with positive values for prior.count, for example > logcpm <- cpm(y, prior.count=2, log=TRUE) where y is the normalized DGEList object. This produces a matrix of log2 counts-per-million (logCPM), with undefined values avoided and the poorly defined log-fold-changes for low counts shrunk towards zero. Larger values for prior.count produce stronger moderation of the values for low counts and more shrinkage of the corresponding log-fold-changes. The logCPM values can optionally be converted to RPKM or FPKM by subtracting log2 of gene length, see rpkm().
+
+```{r}
+logcpmcountdataDGE <- cpm(countdataDGE, prior.count=2, log=TRUE)
+```
+
+#Plots and clustering for visual data exploration of edgeR normalization
+The performance of the edgeR TMM normalization procedure can be examined using mean-difference (MD) plots. This visualizes the library size-adjusted log-fold change between two libraries (the difference) against the average log-expression across those libraries (the mean). The following MD plot is generated by comparing sample 1 against an artificial library constructed from the average of all other samples.
+
+```{r}
+par(mfrow=c(1,2))
+for (i in seq(1, 22)){
+  plotMD(logcpmcountdataDGE, col=i)
+  abline(h=0, col="red", lty=2, lwd=2)
+}
+```
+Ideally, the bulk of genes should be centred at a log-fold change of zero, as is the case for our samples. This indicates that any composition bias between libraries has been successfully removed.
+
+```{r}
+#Boxplot
+boxplot(logcpmcountdataDGE, col="blue")#blue because we are blue group! 
+dev.print(pdf,"logcpmcountdataDGE_boxplot.pdf")
+```
+The boxplot shows that the normalized counts of samples have similar normal distribution with equal variance.
+
+```{r}
+#MDSplot
+plotMDS(logcpmcountdataDGE, col="blue")#like PCA plot
+dev.print(pdf,"logcpmcountdataDGE_MDSplot.pdf")
+```
+The MDS plot shows multiple clusters of the samples. Next, we will use K-means hierarchial clustering to determine the minimum number of clusters requred for minimum sum of squares within group. Clustering diagram also helps view the samples in the clusters better. 
+```{r}
+#Clustering
+mydata <- logcpmcountdataDGE#for genes in rows
+mydata_t <- t(mydata)#for samples in rows
+#Determine number of clusters with samples in rows, cluater values to try between 2 to 20
+wss_t <- (nrow(mydata_t)-1)*sum(apply(mydata_t,2,var))
+for (i in 2:20) wss_t[i] <- sum(kmeans(mydata_t, centers=i)$withinss)
+plot(1:20, wss_t, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares")
+dev.print(pdf,"logcpmcountdataDGE_Clusters&SumofSquared.pdf")
+```
+Therefore the graph indicates, 11 is the minimum number of clusters required for least within group sum of squares
+
+```{r}
+# K-Means Cluster Analysis with samples in rows
+cluster_t <- kmeans(mydata_t, 11) # 11 cluster solution
+# get cluster means 
+aggregate(mydata_t,by=list(cluster_t$cluster),FUN=mean)
+# append cluster assignment
+mydata_t <- data.frame(mydata_t, cluster_t$cluster)
+# Ward Hierarchical Clustering with sample in rows
+d_t <- dist(mydata_t, method = "euclidean") # distance matrix
+cluster_t <- hclust(d_t, method="ward") 
+plot(cluster_t) # display dendogram
+groups_t <- cutree(cluster_t, k=11) # cut tree into 11 clusters
+# draw dendogram with red borders around the 11 clusters 
+rect.hclust(cluster_t, k=11, border="red")
+dev.print(pdf,"logcpmcountdataDGE_ClustersDendrogram.pdf")
+```
+
+```{r}
+clustered_samples<-as.data.frame(groups_t)#converting list or 'Values' object to Data object
+#include columns from metatable 
+clustered_samples$individual_id<-metatable$individual_id
+clustered_samples$cell_type<-metatable$cell_type
+clustered_samples$activated.stemcell_non.stemcell<-metatable$activated.stemcell_non.stemcell
+clustered_samples$cell_type_full_name<-metatable$cell_type_full_name
+clustered_samples$cell_tissue<-metatable$cell_tissue
+clustered_samples$GSE_id<-metatable$GSE_id
+#lets view the clustered_samples data
+print(clustered_samples)
+View(clustered_samples)
+write.table(clustered_samples,file="clustered_samples.txt",sep="\t")
+```
+
+```{r}
+ggplot(clustered_samples, aes(x=cell_type, y=groups_t, fill=groups_t)) + geom_point(shape=21, size=10) + scale_fill_gradient(low='white', high='blue')
+dev.print(pdf,"logcpmcountdataDGE_ClusterPlot.pdf")
+```
+
+The clustering result shows that each cell type cluster with each other. These results give confidence that we should be able to find differentially expressed genes 'between clusters' of cell types or stem cells i.e. asc vs non-stemcells with the edgeR differetial gene expression analysis. 
+
+#edgeR model fitting
+Here we fit the model based on design using normalized DGElist 'countdataDGE' with dispertion estimates. 
+```{r}
+#Alternative
+#glmQLFit(countdataDGE, design)
+fit <- glmFit(countdataDGE, design) 
+summary(fit)
+print(fit)
+```
+Fitted values can be extracted using fit$fitted.values. Therafter can make plots and clustering same as 'mydata' logcpm data.Here, we do a simple log transformation of the data without using cpm function of edgeR
+```{r}
+#Alternative
+#logcountdataDGEfit <- cpm(fit$fitted.values, prior.count=2, log=TRUE)
+logcountdataDGEfit <- log2(fit$fitted.values+1)
+```
+
+#Plots and clustering for visual data exploration of edgeR model fitted values
+```{r}
+#Boxplot
+boxplot(logcountdataDGEfit, col="blue")#blue because we are blue group! 
+dev.print(pdf,"logcountdataDGEfit_boxplot.pdf")
+```
+The boxplot shows that the fitted.counts of samples have similar normal distribution with equal variance.
+```{r}
+#MDSplot
+plotMDS(logcountdataDGEfit, col="blue")#like PCA plot
+dev.print(pdf,"logcountdataDGEfit_MDSplot.pdf")
+```
+The MDS plot shows multiple clusters of the samples. Next, we will use K-means hierarchial clustering to determine the minimum number of clusters requred for minimum sum of squares within group. Clustering diagram also helps view the samples in the clusters better.
+```{r}
+#Clustering
+mydatafit <- logcountdataDGEfit#for genes in rows
+mydatafit_t <- t(mydatafit)#for samples in rows
+#Determine number of clusters with samples in rows, cluater values to try between 2 to 20
+wssfit_t <- (nrow(mydatafit_t)-1)*sum(apply(mydatafit_t,2,var))
+for (i in 2:20) wssfit_t[i] <- sum(kmeans(mydatafit_t, centers=i)$withinss)
+plot(1:20, wssfit_t, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares")
+dev.print(pdf,"logcountdataDGEfit_Clusters&SumofSquared.pdf")
+```
+Therefore the graph indicates, 8 is the minimum number of clusters required for least within group sum of squares.
+```{r}
+# K-Means Cluster Analysis with samples in rows
+clusterfit_t <- kmeans(mydatafit_t, 8) # 8 cluster solution
+# get cluster means 
+aggregate(mydatafit_t,by=list(clusterfit_t$cluster),FUN=mean)
+# append cluster assignment
+mydatafit_t <- data.frame(mydatafit_t, clusterfit_t$cluster)
+# Ward Hierarchical Clustering with sample in rows
+dfit_t <- dist(mydatafit_t, method = "euclidean") # distance matrix
+clusterfit_t <- hclust(d_t, method="ward") 
+plot(clusterfit_t) # display dendogram
+groupsfit_t <- cutree(clusterfit_t, k=8) # cut tree into 8 clusters
+# draw dendogram with red borders around the 8 clusters 
+rect.hclust(clusterfit_t, k=8, border="red")
+dev.print(pdf,"logcountdataDGEfit_ClustersDendrogram.pdf")
+```
+
+```{r}
+clusteredfit_samples<-as.data.frame(groupsfit_t)#converting list or 'Values' object to Data object
+#include columns from metatable 
+clusteredfit_samples$individual_id<-metatable$individual_id
+clusteredfit_samples$cell_type<-metatable$cell_type
+clusteredfit_samples$activated.stemcell_non.stemcell<-metatable$activated.stemcell_non.stemcell
+clusteredfit_samples$cell_type_full_name<-metatable$cell_type_full_name
+clusteredfit_samples$cell_tissue<-metatable$cell_tissue
+clusteredfit_samples$GSE_id<-metatable$GSE_id
+#lets view the clustered_samples data
+print(clusteredfit_samples)
+View(clusteredfit_samples)
+write.table(clusteredfit_samples,file="clusteredfit_samples.txt",sep="\t")
+```
+
+```{r}
+ggplot(clusteredfit_samples, aes(x=cell_type, y=groupsfit_t, fill=groupsfit_t)) + geom_point(shape=21, size=10) + scale_fill_gradient(low='white', high='blue')
+dev.print(pdf,"logcountdataDGEfit_ClusterPlot.pdf")
+```
+The clustering result shows that each cell type cluster with each other. These results give confidence that we should be able to find differentially expressed genes 'between clusters' of cell types or stem cells i.e. asc vs non-stemcells with the edgeR differetial gene expression analysis. 
+
+#edgeR differential gene expression FDR <0.05, p-value <0.05, 10 FC (fold change) and higher expression (or counts) in stem cells relative to non-stem cells
+```{r}
+colnames(fit)
+colnames(design)
+```
+In DE(differntial expression) testing we need to specify for which variable(s) dependent differential gene expression we want. We can get differential gene expression for the coefficients shown above i.e. [2]individual_id (individuals), [3]activated.stemcell_non.stemcellnonsc (activted stem cells vs other non-stem cells) and [4]cell_tissuehippocampus (hippocampus vs cerebral cortex)
+
+Note: The fit was done using all variables [2], [3] and [4]. So this should be a good representation of gene expression changes for the selected coefficient only without any of the other effects. This varible we are calling deGenes_lrt is also called just lrt in the edgeR vineattes. 
+```{r}
+#Alternatives
+#deGenes_lrt<- glmQLFTest(fit, coef=3)
+#deGenes_lrt<- glmLRT(fit, coef=3) 
+deGenes_lrt <- glmLRT(fit, coef="activated.stemcell_non.stemcellnonsc")
+summary(deGenes_lrt)
+print(deGenes_lrt)
+```
+Both from deGenes_lrt we can get any feature as tables by using 
+the options $fitted.values and $table etc.
+
+```{r}
+#topTags is a special edgeR function to add FDR column
+deGenes_lrt_fdr<-topTags(deGenes_lrt, n = nrow(deGenes_lrt$table))$table
+deGenes_lrt_fdr<-deGenes_lrt_fdr[deGenes_lrt_fdr$FDR<0.05,]
+deGenes_lrt_fdr<-deGenes_lrt_fdr[deGenes_lrt_fdr$PValue<0.05,]
+deGenes_lrt_fdr$gene<-rownames(deGenes_lrt_fdr)
+```
+
+```{r}
+#get counts original from DGElist object countdataDGE
+countdataDGE_counts<-as.data.frame(countdataDGE$counts)
+countdataDGE_counts$gene<-rownames(countdataDGE_counts)
+fit_fittedcounts<-as.data.frame(deGenes_lrt$fitted.values)
+fit_fittedcounts$gene<-rownames(fit_fittedcounts)
+```
+
+```{r}
+#Now merge the datasets to have the counts and fitted.values i.e. fitted counts in the same file as logFC, FDR and p-value
+deGenes_lrt_fdr<-merge(deGenes_lrt_fdr, countdataDGE_counts, by='gene')
+deGenes_lrt_fdr<-merge(deGenes_lrt_fdr, fit_fittedcounts, by='gene')
+dim(deGenes_lrt_fdr)
+glimpse(deGenes_lrt_fdr)
+```
+
+```{r}
+ggplot(deGenes_lrt_fdr, aes(logFC, colour = logFC)) +  geom_density() + xlim(-20, 20)
+dev.print(pdf,"deGenes_lrt_fdr_initial_DensityPlot.pdf")
+```
+The plot shows both upregulated (FC up) and downregulated (FC down) genes
+```{r}
+colnames(design)
+head(design, n=10)
+```
+Note that in the design matrix non-stemcells are asigned 1 while stem cells are assigned 0. Thus, logFC is represented as log(non-stemcells/stemcells). 
+
+```{r}
+deGenes_lrt_fdr<-deGenes_lrt_fdr[abs(deGenes_lrt_fdr$logFC)>=3.3,]#10 fold change in other cell types relative to stem cells
+dim(deGenes_lrt_fdr)
+```
+
+```{r}
+#Selecting higher expression (or counts) in stem cells relative to non-stem cells
+#Keep values where fitted.values or counts of stem cells in columns 29 to 32 is higher than fitted.values or counts of non-stem cells in columns 33 to 50
+KeepValuesSum<-rowSums(deGenes_lrt_fdr[,29:32])>rowSums(deGenes_lrt_fdr[,33:50])
+deGenes_lrt_fdr<-deGenes_lrt_fdr[KeepValuesSum,]
+dim(deGenes_lrt_fdr)
+write.table(deGenes_lrt_fdr,file="deGenes_lrt_fdr.txt",sep="\t")
+```
+
+```{r}
+ggplot(deGenes_lrt_fdr, aes(logFC, colour = logFC)) +  geom_density() + xlim(-20, 20)
+dev.print(pdf,"deGenes_lrt_fdr_final_DensityPlot.pdf")
+```
+Here in the density plot we see downregulated for FC=non-stem cell/stem-cell, which is same as genes upregulated for FC=stem cells/non-stem cells  
+
+#Heatmap and correlation plots of differentially expressed genes
+```{r}
+#Heatmap 
+myheatmap<-logcountdataDGEfit[deGenes_lrt_fdr$gene,]#transformed counts for differentially expressed genes 
+mapdata_matrix<-data.matrix(myheatmap)
+colfunc<-colorRampPalette(c("green","black","red")) 
+hr<-hclust(as.dist(1-cor(t(mapdata_matrix),method="pearson")),method="complete")
+plotheatmap<-heatmap.2(mapdata_matrix,Rowv=as.dendrogram(hr),scale="row",density.info="none",trace="none",col=colfunc(256))
+dev.print(pdf,"logcpmcountdataDGE_Heatmap_clustering.pdf")
+```
+
+```{r}
+#Correlation 
+corrdata<-logcountdataDGEfit[deGenes_lrt_fdr$gene,]#transformed counts for differentially expressed genes 
+rel<-rcorr(as.matrix(corrdata))
+#Extract the correlation coefficients r
+rel$r
+rel_r<-rel$r
+write.table(rel_r,file="logcpmcountdataDGE_corr_r-value.txt",sep="\t")
+#Extract p-values
+rel$P
+rel_P<-rel$P
+write.table(rel_P,file="logcpmcountdataDGE_corr_P-value.txt",sep="\t")
+#plot corelations and p-value
+plot_corrdata<-corrplot(rel$r, type="full", order="hclust", p.mat = rel$P, sig.level = 0.01, insig = "blank")
+dev.print(pdf,"logcpmcountdataDGE_corrplot.pdf")
+```
+The heatmap and correlation plots show sample grouping based on genes differentially expressed between stem cells and non-stem-cells by 10 fold, and with higher expression or counts in stem cells relative to non-stem cells.
+
+In summary 78 stem cell specific genes have been identified from the above edgeR analysis. 
+
+#Gene Ontology and pathway analysis using Enrichr. Webersion is also available and is highly interactive, http://amp.pharm.mssm.edu/Enrichr/enrich
+
+```{r}
+dbs <- listEnrichrDbs()
+dbs
+```
+
+```{r}
+#select pathway databases of choice from above
+dbs_select<-c("GO_Biological_Process_2017","KEGG_2016", "Reactome_2016")
+```
+
+```{r}
+#compare for enrichment with the 78 stem cell specific genes list
+enriched<-enrichr(deGenes_lrt_fdr$gene, dbs_select)
+```
+#GO biological process
+```{r}
+deGenes_lrt_fdr_GO_Biological_Process_2017<-enriched[["GO_Biological_Process_2017"]]
+print(deGenes_lrt_fdr_GO_Biological_Process_2017)
+write.table(deGenes_lrt_fdr_GO_Biological_Process_2017,file="deGenes_lrt_fdr_GO_Biological_Process_2017.txt",sep="\t")
+View(deGenes_lrt_fdr_GO_Biological_Process_2017)
+```
+
+```{r}
+#plotting the top 10 terms
+deGenes_lrt_fdr_GO_Biological_Process_2017Data<-deGenes_lrt_fdr_GO_Biological_Process_2017[order(-deGenes_lrt_fdr_GO_Biological_Process_2017$Combined.Score),]
+deGenes_lrt_fdr_GO_Biological_Process_2017Data<-deGenes_lrt_fdr_GO_Biological_Process_2017Data[1:10,]
+ggplot(deGenes_lrt_fdr_GO_Biological_Process_2017Data,aes(x=Term, y = Combined.Score)) + geom_bar(stat = 'identity', fill="blue", position='dodge') +coord_flip()
+dev.print(pdf,"deGenes_lrt_fdr_GO_Biological_Process_2017plot.pdf")
+```
+#KEGG pathway
+```{r}
+deGenes_lrt_fdr_KEGG_2016<-enriched[["KEGG_2016"]]
+print(deGenes_lrt_fdr_KEGG_2016)
+write.table(deGenes_lrt_fdr_KEGG_2016,file="deGenes_lrt_fdr_KEGG_2016.txt",sep="\t")
+View(deGenes_lrt_fdr_KEGG_2016)
+```
+
+```{r}
+#plotting the top 10 terms
+deGenes_lrt_fdr_KEGG_2016Data<-deGenes_lrt_fdr_KEGG_2016[order(-deGenes_lrt_fdr_KEGG_2016$Combined.Score),]
+deGenes_lrt_fdr_KEGG_2016Data<-deGenes_lrt_fdr_KEGG_2016Data[1:10,]
+ggplot(deGenes_lrt_fdr_KEGG_2016Data,aes(x=Term, y = Combined.Score)) + geom_bar(stat = 'identity', fill="blue", position='dodge') +coord_flip()
+dev.print(pdf,"deGenes_lrt_fdr_KEGG_2016plot.pdf")
+```
+#Reactome pathway
+```{r}
+deGenes_lrt_fdr_Reactome_2016<-enriched[["Reactome_2016"]]
+print(deGenes_lrt_fdr_Reactome_2016)
+write.table(deGenes_lrt_fdr_Reactome_2016,file="deGenes_lrt_fdr_Reactome_2016.txt",sep="\t")
+View(deGenes_lrt_fdr_Reactome_2016)
+```
+
+```{r}
+#plotting the top 10 terms
+deGenes_lrt_fdr_Reactome_2016Data<-deGenes_lrt_fdr_Reactome_2016[order(-deGenes_lrt_fdr_Reactome_2016$Combined.Score),]
+deGenes_lrt_fdr_Reactome_2016Data<-deGenes_lrt_fdr_Reactome_2016Data[1:10,]
+ggplot(deGenes_lrt_fdr_Reactome_2016Data,aes(x=Term, y = Combined.Score)) + geom_bar(stat = 'identity', fill="blue", position='dodge') +coord_flip()
+dev.print(pdf,"deGenes_lrt_fdr_Reactome_2016plot.pdf")
+```
+#Convertion of Mouse gene symbols to human gene symbols. 
+Our gene list is mouse gene symbols, so first create a function to convert the mouse gene symbols to human gene symbol Reference: https://www.r-bloggers.com/converting-mouse-to-human-gene-names-with-biomart-package/
+
+```{r}
+library(biomaRt)
+listMarts()
+```
+
+```{r}
+# Basic function to convert mouse to human gene symbol
+convertMouseGeneList <- function(x){
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+ 
+genesV2 = getLDS(attributes = c("mgi_symbol"), filters = "mgi_symbol", values = x , mart = mouse, attributesL = c("hgnc_symbol"), martL = human, uniqueRows=T)
+
+return(genesV2)
+}
+```
+
+```{r}
+deGenes_lrt_fdrHuMs<-convertMouseGeneList(deGenes_lrt_fdr$gene)
+deGenes_lrt_fdr1<-deGenes_lrt_fdr
+colnames(deGenes_lrt_fdr1)[1]<-"MGI.symbol"
+deGenes_lrt_fdrHuMs<-merge(deGenes_lrt_fdrHuMs, deGenes_lrt_fdr1, by='MGI.symbol')
+write.table(deGenes_lrt_fdrHuMs, file = 'deGenes_lrt_fdrHuMs.txt', quote = F, row.names = F)
+dim(deGenes_lrt_fdrHuMs)
+View(deGenes_lrt_fdrHuMs)
+```
+
+
+#Comparison with Human disease associated genes using Human gene Symbols
+Import the consolidated data repository containing genetic variants, biomarkers and associations with diseases.
+
+```{r}
+disgenet_DisgenetConsolidated=read.delim('DisGeNet_consolidated_disease_genes.txt', header = T, sep = '\t')
+dim(disgenet_DisgenetConsolidated)
+glimpse(disgenet_DisgenetConsolidated)
+```
+
+```{r}
+colnames(disgenet_DisgenetConsolidated)[1]<-"HGNC.symbol"
+View(disgenet_DisgenetConsolidated)
+```
+
+```{r}
+#Comparison with stem cell genes
+deGenes_lrt_fdrHuMsDisgenetConsolidated<-merge(deGenes_lrt_fdrHuMs,disgenet_DisgenetConsolidated,by="HGNC.symbol")
+glimpse(deGenes_lrt_fdrHuMsDisgenetConsolidated, n=5)
+write.table(deGenes_lrt_fdrHuMsDisgenetConsolidated,file="deGenes_lrt_fdrHuMsDisgenetConsolidated.txt",sep="\t")
+```
+
+```{r}
+venn( list(A=deGenes_lrt_fdrHuMs$HGNC.symbol,B=disgenet_DisgenetConsolidated$HGNC.symbol))
+dev.print(pdf,"deGenes_lrt_fdrHuMsDisgenetConsolidated_Venn.pdf")
+```
+
+Statistical significance of DisGeNet overlap
+```{r}
+A=deGenes_lrt_fdrHuMs$HGNC.symbol
+B=unique(disgenet_DisgenetConsolidated$HGNC.symbol)
+go.obj <- newGeneOverlap(A,B)
+go.obj <- testGeneOverlap(go.obj)
+go.obj  # show
+```
+Given two gene lists, tests the significance of their overlap in comparison with a genomic background. The null hypothesis is that the odds ratio is no larger than 1. The alternative is that the odds ratio is larger than 1.0. It returns the p-value, estimated odds ratio and intersection.
+```{r}
+print(go.obj)  # more details.
+getContbl(go.obj)  # contingency table.
+```
+These results show that the overlap is NOT significant p-value=0.097 and 'Overlap tested using Fisher's exact test (alternative=greater)'. Therefore, accept null hypothesis that the odds ratio is not larger than 1 and overlap is not significant.
+
+#Comparison with Human neurological disease associated genes using Human gene Symbols
+Import the consolidated data repository containing genetic variants associated with neurological diseases.
+
+```{r}
+disgenet_neuroDiseaseVariants=read.delim('DisGeNet_neuro_genetic-disease.txt', header = T, sep = '\t')
+dim(disgenet_neuroDiseaseVariants)
+glimpse(disgenet_neuroDiseaseVariants)
+```
+
+```{r}
+colnames(disgenet_neuroDiseaseVariants)[1]<-"HGNC.symbol"
+View(disgenet_neuroDiseaseVariants)
+```
+
+```{r}
+#Comparison with stem cell genes
+deGenes_lrt_fdrHuMsneuroDiseaseVariants<-merge(deGenes_lrt_fdrHuMs,disgenet_neuroDiseaseVariants,by="HGNC.symbol")
+glimpse(deGenes_lrt_fdrHuMsneuroDiseaseVariants, n=5)
+write.table(deGenes_lrt_fdrHuMsneuroDiseaseVariants,file="deGenes_lrt_fdrHuMsneuroDiseaseVariants.txt",sep="\t")
+```
+
+```{r}
+venn( list(A=deGenes_lrt_fdrHuMs$HGNC.symbol,B=disgenet_neuroDiseaseVariants$HGNC.symbol))
+dev.print(pdf,"deGenes_lrt_fdrHuMsneuroDiseaseVariants_Venn.pdf")
+```
+
+Statistical significance of DisGeNet overlap
+```{r}
+A=deGenes_lrt_fdrHuMs$HGNC.symbol
+B=unique(disgenet_neuroDiseaseVariants$HGNC.symbol)
+go.obj <- newGeneOverlap(A,B)
+go.obj <- testGeneOverlap(go.obj)
+go.obj  # show
+```
+Given two gene lists, tests the significance of their overlap in comparison with a genomic background. The null hypothesis is that the odds ratio is no larger than 1. The alternative is that the odds ratio is larger than 1.0. It returns the p-value, estimated odds ratio and intersection.
+```{r}
+print(go.obj)  # more details.
+getContbl(go.obj)  # contingency table.
+```
+These results show that the overlap is NOT significant p-value=0.17 and 'Overlap tested using Fisher's exact test (alternative=greater)'. Therefore, accept null hypothesis that the odds ratio is not larger than 1 and overlap is not significant.
