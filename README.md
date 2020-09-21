@@ -25,7 +25,7 @@ Youtube Channel Link https://www.youtube.com/user/smukher2/playlists
 
 
 
-Format: the pipelines are provided as 1)Rmarkdown files knit to html 2) Rmarkdown files knit to pdf and 3) Rmarkdown or rmd files that can be opened and run on Rstudio by just hitting the "run current chunk" button
+# Format: the pipelines are provided as 1)Rmarkdown files knit to html 2) Rmarkdown files knit to pdf and 3) Rmarkdown or rmd files that can be opened and run on Rstudio by just hitting the "run current chunk" button
 
 This pipeline shows steps from input count data-(to)->Differential gene expression (edgeR)-(to)->Visualization-(to)->GO analysis, pathway analysis and DisGeNet analysis
 1) Differential gene expression analysis with edgeR
